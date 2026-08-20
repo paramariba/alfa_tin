@@ -1,0 +1,16 @@
+- {ticker: SBER, mic: MISX, symbol: SBER@MISX, enabled: true, category: stock}
+- {ticker: YDEX, mic: MISX, symbol: YDEX@MISX, enabled: true, category: stock}
+- {ticker: LKOH, mic: MISX, symbol: LKOH@MISX, enabled: true, category: stock}
+- {ticker: GAZP, mic: MISX, symbol: GAZP@MISX, enabled: true, category: stock}
+- {ticker: T, mic: MISX, symbol: T@MISX, enabled: true, category: stock}
+- {ticker: NVTK, mic: MISX, symbol: NVTK@MISX, enabled: true, category: stock}
+- {ticker: ROSN, mic: MISX, symbol: ROSN@MISX, enabled: true, category: stock}
+- {ticker: GMKN, mic: MISX, symbol: GMKN@MISX, enabled: true, category: stock}
+- {ticker: PLZL, mic: MISX, symbol: PLZL@MISX, enabled: true, category: stock}
+- {ticker: MGNT, mic: MISX, symbol: MGNT@MISX, enabled: true, category: stock}
+- {ticker: X5, mic: MISX, symbol: X5@MISX, enabled: true, category: stock}
+- {ticker: OZON, mic: MISX, symbol: OZON@MISX, enabled: true, category: stock}
+- {ticker: AFLT, mic: MISX, symbol: AFLT@MISX, enabled: true, category: stock}
+- {ticker: PHOR, mic: MISX, symbol: PHOR@MISX, enabled: true, category: stock}
+- {ticker: CHMF, mic: MISX, symbol: CHMF@MISX, enabled: true, category: stock}
+

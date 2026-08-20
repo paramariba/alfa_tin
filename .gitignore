@@ -1,0 +1,14 @@
+.env
+.idea/
+.DS_Store
+*.orig
+*.log
+.~lock.*#
+.venv/
+node_modules/
+dist/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.tsbuildinfo
+app-data/*.db*

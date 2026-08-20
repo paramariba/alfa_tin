@@ -1,0 +1,27 @@
+services:
+  backend:
+    build: ./backend
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /data/alfa_tin.db
+      REDIS_URL: redis://redis:6379/0
+      DEMO_MODE: "true"
+    volumes:
+      - alfa-data:/data
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+  frontend:
+    build: ./frontend
+    ports:
+      - "4173:4173"
+    depends_on:
+      - backend
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+volumes:
+  alfa-data:

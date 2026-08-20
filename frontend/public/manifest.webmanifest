@@ -1,0 +1,11 @@
+{
+  "name": "Альфа Тин — инвестиционная игра",
+  "short_name": "Альфа Тин",
+  "description": "Безопасный инвестиционный симулятор для подростков",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f5f6",
+  "theme_color": "#ef3124",
+  "lang": "ru",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

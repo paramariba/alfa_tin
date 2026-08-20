@@ -1,0 +1,4 @@
+- {ticker: TMOS, mic: MISX, symbol: TMOS@MISX, enabled: true, category: fund}
+- {ticker: SBMX, mic: MISX, symbol: SBMX@MISX, enabled: true, category: fund}
+- {ticker: LQDT, mic: MISX, symbol: LQDT@MISX, enabled: true, category: fund}
+- {ticker: GOLD, mic: MISX, symbol: GOLD@MISX, enabled: true, category: fund}
