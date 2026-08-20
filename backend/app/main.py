@@ -42,6 +42,7 @@ DEMO_MODE = os.getenv("DEMO_MODE", "true").lower() == "true"
 MULTIPLIER = d(os.getenv("GAME_RETURN_MULTIPLIER", "10"))
 MARKET_DATA_PROVIDER = os.getenv("MARKET_DATA_PROVIDER", "auto").strip().lower()
 MARKET_REFRESH_SECONDS = max(10.0, float(os.getenv("MARKET_REFRESH_SECONDS", "15")))
+ROSTICS_WHEEL_COST_TKN = money(d(os.getenv("ROSTICS_WHEEL_COST_TKN", "50")))
 MOEX_ISS_BASE_URL = os.getenv("MOEX_ISS_BASE_URL", "https://iss.moex.com/iss").rstrip("/")
 MOEX_BOARD = os.getenv("MOEX_BOARD", "TQBR").strip().upper()
 MOEX_REQUEST_TIMEOUT_SECONDS = max(1.0, float(os.getenv("MOEX_REQUEST_TIMEOUT_SECONDS", "15")))
@@ -66,6 +67,8 @@ CURRENT_USER_ID: ContextVar[int | None] = ContextVar("alfa_tin_current_user_id",
 
 if MARKET_DATA_PROVIDER not in {"auto", "finam", "moex", "demo"}:
     raise RuntimeError("MARKET_DATA_PROVIDER must be one of: auto, finam, moex, demo")
+if ROSTICS_WHEEL_COST_TKN <= 0:
+    raise RuntimeError("ROSTICS_WHEEL_COST_TKN must be greater than zero")
 if APP_ENV == "production" and APP_SECRET in {"", "change-me", "alfa-tin-dev-secret"}:
     raise RuntimeError("APP_SECRET must be changed in production")
 
@@ -253,6 +256,7 @@ CREATE TABLE IF NOT EXISTS conversions(id INTEGER PRIMARY KEY, user_id INTEGER, 
 CREATE TABLE IF NOT EXISTS shop_items(id INTEGER PRIMARY KEY, slug TEXT UNIQUE, name TEXT, description TEXT, type TEXT, price_ac INTEGER, image_emoji TEXT, active INTEGER, stock_quantity INTEGER, sort_order INTEGER);
 CREATE TABLE IF NOT EXISTS shop_orders(id INTEGER PRIMARY KEY, user_id INTEGER, shop_item_id INTEGER, quantity INTEGER, total_ac INTEGER, status TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS user_goals(user_id INTEGER PRIMARY KEY, shop_item_id INTEGER, created_at TEXT);
+CREATE TABLE IF NOT EXISTS rostics_wheel_spins(id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), segment_index INTEGER NOT NULL, result_code TEXT NOT NULL, result_label TEXT NOT NULL, prize_emoji TEXT NOT NULL, is_win INTEGER NOT NULL, cost_tkn TEXT NOT NULL, fulfillment_status TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS lessons(id INTEGER PRIMARY KEY, course TEXT, title TEXT, description TEXT, xp_reward INTEGER, boost_reward INTEGER, order_index INTEGER);
 CREATE TABLE IF NOT EXISTS lesson_progress(user_id INTEGER, lesson_id INTEGER, completed_at TEXT, PRIMARY KEY(user_id,lesson_id));
 CREATE TABLE IF NOT EXISTS quests(id INTEGER PRIMARY KEY, type TEXT, title TEXT, target INTEGER, xp_reward INTEGER, boost_reward INTEGER);
@@ -296,6 +300,17 @@ INSTRUMENTS = [
     ("LQDT", "Ликвидность", "Денежный рынок", "Низкий", "Фонд денежного рынка", "1.78", "1.77", 1, "fund"),
     ("GOLD", "Золото", "Драгметаллы", "Средний", "Фонд с привязкой к золоту", "2.48", "2.45", 0, "fund"),
 ]
+
+ROSTICS_WHEEL_SEGMENTS = (
+    {"code": "small-fries", "label": "Малый картофель фри", "emoji": "🍟", "is_win": True},
+    {"code": "empty-1", "label": "В этот раз ничего", "emoji": "✦", "is_win": False},
+    {"code": "pie", "label": "Пирожок", "emoji": "🥧", "is_win": True},
+    {"code": "empty-2", "label": "В этот раз ничего", "emoji": "✦", "is_win": False},
+    {"code": "sauce", "label": "Соус", "emoji": "🥫", "is_win": True},
+    {"code": "empty-3", "label": "В этот раз ничего", "emoji": "✦", "is_win": False},
+    {"code": "small-drink", "label": "Напиток 0,3 л", "emoji": "🥤", "is_win": True},
+    {"code": "empty-4", "label": "В этот раз ничего", "emoji": "✦", "is_win": False},
+)
 
 SHOP = [
     ("sticker", "Sticker Pack Alfa", "Стикеры для ноутбука и телефона", "physical", 2700, "✨", 30),
@@ -1956,6 +1971,91 @@ def piggy_history():
 @app.get("/api/v1/shop/items")
 def shop_items():
     with db() as con: return [dict(r) for r in con.execute("SELECT * FROM shop_items WHERE active=1 ORDER BY sort_order").fetchall()]
+
+
+def rostics_wheel_payload(con: sqlite3.Connection, user_id: int) -> dict[str, Any]:
+    w = wallet(con, user_id)
+    history = [
+        dict(row)
+        for row in con.execute(
+            "SELECT id,segment_index,result_code,result_label,prize_emoji,is_win,cost_tkn,fulfillment_status,created_at "
+            "FROM rostics_wheel_spins WHERE user_id=? ORDER BY id DESC LIMIT 12",
+            (user_id,),
+        ).fetchall()
+    ]
+    return {
+        "cost_tkn": float(ROSTICS_WHEEL_COST_TKN),
+        "token_cash": float(d(w["token_cash"])),
+        "win_probability": 0.5,
+        "segments": [dict(segment) for segment in ROSTICS_WHEEL_SEGMENTS],
+        "history": history,
+        "disclaimer": "Демо-промо: выдача реальных призов и промокодов требует интеграции с Rostic's.",
+    }
+
+
+@app.get("/api/v1/shop/rostics-wheel")
+def rostics_wheel():
+    user_id = current_user_id()
+    with db() as con:
+        return rostics_wheel_payload(con, user_id)
+
+
+@app.post("/api/v1/shop/rostics-wheel/spin")
+def spin_rostics_wheel(idempotency_key: str | None = Header(None)):
+    user_id = current_user_id()
+    key = f"rostics-wheel:{idempotency_key or secrets.token_hex(16)}"
+    with db() as con:
+        con.execute("BEGIN IMMEDIATE")
+        cached = con.execute(
+            "SELECT response_json FROM idempotency WHERE user_id=? AND key=?",
+            (user_id, key),
+        ).fetchone()
+        if cached:
+            return json.loads(cached["response_json"])
+
+        w = wallet(con, user_id)
+        cash = d(w["token_cash"])
+        if cash < ROSTICS_WHEEL_COST_TKN:
+            raise HTTPException(400, f"Для вращения нужно {ROSTICS_WHEEL_COST_TKN} TKN")
+
+        segment_index = secrets.randbelow(len(ROSTICS_WHEEL_SEGMENTS))
+        segment = ROSTICS_WHEEL_SEGMENTS[segment_index]
+        new_cash = money(cash - ROSTICS_WHEEL_COST_TKN)
+        created_at = now()
+        fulfillment_status = "demo-won" if segment["is_win"] else "not-won"
+        spin_id = con.execute(
+            "INSERT INTO rostics_wheel_spins(user_id,segment_index,result_code,result_label,prize_emoji,is_win,cost_tkn,fulfillment_status,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                user_id, segment_index, segment["code"], segment["label"], segment["emoji"],
+                int(segment["is_win"]), str(ROSTICS_WHEEL_COST_TKN), fulfillment_status, created_at,
+            ),
+        ).lastrowid
+        con.execute(
+            "UPDATE wallets SET token_cash=?,updated_at=? WHERE user_id=?",
+            (str(new_cash), created_at, user_id),
+        )
+        ledger(
+            con, "ROSTICS_WHEEL_SPIN", -ROSTICS_WHEEL_COST_TKN, new_cash,
+            ref_type="rostics_wheel", ref_id=str(spin_id),
+            metadata={"result_code": segment["code"], "is_win": segment["is_win"]}, user_id=user_id,
+        )
+        response = {
+            "ok": True,
+            "spin_id": spin_id,
+            "segment_index": segment_index,
+            "result": dict(segment),
+            "cost_tkn": float(ROSTICS_WHEEL_COST_TKN),
+            "token_cash": float(new_cash),
+            "fulfillment_status": fulfillment_status,
+            "message": f"Выигрыш: {segment['label']}" if segment["is_win"] else "В этот раз без приза — попробуй ещё позже",
+            "disclaimer": "Приз сохранён в демо-истории. Реальная выдача требует партнёрской интеграции с Rostic's.",
+        }
+        con.execute(
+            "INSERT INTO idempotency(user_id,key,response_json,created_at) VALUES(?,?,?,?)",
+            (user_id, key, json.dumps(response, ensure_ascii=False), created_at),
+        )
+        return response
 
 
 @app.get("/api/v1/shop/goal")

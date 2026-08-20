@@ -40,6 +40,15 @@ async function api<T=any>(path:string, options?:RequestInit):Promise<T> {
   return response.json()
 }
 const fmt = (value:number|string, digits=0) => new Intl.NumberFormat('ru-RU',{maximumFractionDigits:digits,minimumFractionDigits:digits}).format(Number(value))
+const createIdempotencyKey=()=>{
+  const browserCrypto=globalThis.crypto
+  if(typeof browserCrypto?.randomUUID==='function')return browserCrypto.randomUUID()
+  if(typeof browserCrypto?.getRandomValues==='function'){
+    const bytes=browserCrypto.getRandomValues(new Uint8Array(16))
+    return Array.from(bytes,byte=>byte.toString(16).padStart(2,'0')).join('')
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`
+}
 const ageFromDate=(value:string)=>{const born=new Date(`${value}T12:00:00`);if(Number.isNaN(born.getTime()))return null;const today=new Date();let age=today.getFullYear()-born.getFullYear();if(today.getMonth()<born.getMonth()||(today.getMonth()===born.getMonth()&&today.getDate()<born.getDate()))age--;return age}
 const yearsWord=(age:number)=>age%10===1&&age%100!==11?'год':age%10>=2&&age%10<=4&&(age%100<12||age%100>14)?'года':'лет'
 
@@ -659,8 +668,47 @@ function ConvertSheet({conversion,onClose,done,refresh}:{conversion:any;onClose:
 
 type CartItem = { item: any; quantity: number }
 
-function ShopSheet({items,coins,goalId,onClose,refresh,done}:{items:any[];coins:number;goalId?:number;onClose:()=>void;refresh:()=>void;done:(s:string)=>void}){
-  const [view,setView]=useState<'catalog'|'cart'>('catalog')
+function RosticsWheel({tokens,refresh,done}:{tokens:number;refresh:()=>void;done:(s:string)=>void}){
+  const [data,setData]=useState<any>()
+  const [result,setResult]=useState<any>()
+  const [rotation,setRotation]=useState(0)
+  const [busy,setBusy]=useState(false)
+  const load=useCallback(()=>api<any>('/shop/rostics-wheel').then(setData).catch((error:any)=>done(error.message)),[done])
+  useEffect(()=>{load()},[load])
+  const spin=async()=>{
+    setBusy(true);setResult(undefined)
+    try{
+      const response=await api<any>('/shop/rostics-wheel/spin',{method:'POST',headers:{'Idempotency-Key':createIdempotencyKey()}})
+      const target=(360-Number(response.segment_index)*45)%360
+      setRotation(current=>current+1440+((target-(current%360)+360)%360))
+      await new Promise(resolve=>window.setTimeout(resolve,3200))
+      setResult(response)
+      done(response.message)
+      await Promise.all([load(),refresh()])
+    }catch(error:any){done(error.message)}finally{setBusy(false)}
+  }
+  const balance=Number(data?.token_cash??tokens)
+  const cost=Number(data?.cost_tkn??50)
+  const segments=data?.segments||[]
+  return <div className="rostics-wheel-view">
+    <section className="rostics-wheel-hero"><span>ROSTIC’S × АЛЬФА ТИН</span><h2>Колесо призов</h2><p>Четыре призовых сектора и четыре пустых. Одно вращение стоит {fmt(cost)} TKN.</p><div><b>{fmt(balance,2)} TKN</b><small>доступно</small></div></section>
+    <div className="wheel-stage">
+      <i className="wheel-pointer" aria-hidden="true">▼</i>
+      <div className="wheel-disc" style={{transform:`rotate(${rotation}deg)`}}>
+        {segments.map((segment:any,index:number)=><span key={`${segment.code}-${index}`} style={{transform:`rotate(${index*45}deg) translateY(-102px) rotate(${-index*45}deg)`}} title={segment.label}>{segment.emoji}</span>)}
+        <b>R</b>
+      </div>
+    </div>
+    <button className="wheel-spin-button" disabled={busy||balance<cost||segments.length!==8} onClick={spin}>{busy?'Крутим…':balance<cost?`Нужно ${fmt(cost)} TKN`:`Крутить за ${fmt(cost)} TKN`}</button>
+    {result&&<div className={`wheel-result ${result.result.is_win?'win':'empty'}`}><strong>{result.result.emoji} {result.result.is_win?'Есть приз!':'Не повезло'}</strong><span>{result.result.label}</span>{result.result.is_win&&<small>Приз записан в демо-историю.</small>}</div>}
+    <div className="wheel-odds"><strong>Что на колесе</strong><div>{segments.map((segment:any,index:number)=><span key={`${segment.code}-legend-${index}`} className={segment.is_win?'prize':''}>{segment.emoji} {segment.is_win?segment.label:'Ничего'}</span>)}</div></div>
+    {!!data?.history?.length&&<div className="wheel-history"><strong>Последние вращения</strong>{data.history.map((spin:any)=><article key={spin.id}><span>{spin.prize_emoji}</span><div><b>{spin.result_label}</b><small>{new Date(spin.created_at).toLocaleString('ru-RU')}</small></div><em className={spin.is_win?'positive':''}>{spin.is_win?'Приз':'—'}</em></article>)}</div>}
+    <p className="wheel-disclaimer"><Info size={16}/>{data?.disclaimer||'Демо-промо: реальная выдача требует партнёрской интеграции с Rostic’s.'}</p>
+  </div>
+}
+
+function ShopSheet({items,coins,tokens,goalId,onClose,refresh,done}:{items:any[];coins:number;tokens:number;goalId?:number;onClose:()=>void;refresh:()=>void;done:(s:string)=>void}){
+  const [view,setView]=useState<'catalog'|'wheel'|'cart'>('catalog')
   const [cart,setCart]=useState<CartItem[]>([])
   const [busy,setBusy]=useState(false)
 
@@ -733,6 +781,7 @@ function ShopSheet({items,coins,goalId,onClose,refresh,done}:{items:any[];coins:
           </div>
           <div className="shop-view-toggle">
             <button className={view==='catalog'?'active':''} onClick={()=>setView('catalog')}>Каталог</button>
+            <button className={view==='wheel'?'active':''} onClick={()=>setView('wheel')}>Rostic’s</button>
             <button className={view==='cart'?'active':''} onClick={()=>setView('cart')}>
               Корзина {totalCount > 0 && <span className="cart-badge">{totalCount}</span>}
             </button>
@@ -766,6 +815,8 @@ function ShopSheet({items,coins,goalId,onClose,refresh,done}:{items:any[];coins:
               )
             })}
           </div>
+        ) : view === 'wheel' ? (
+          <RosticsWheel tokens={tokens} refresh={refresh} done={done}/>
         ) : (
           <div className="cart-view">
             {cart.length === 0 ? (
@@ -825,7 +876,7 @@ function ShareTradeSheet({trade,onClose,onPublished,done}:{trade:any;onClose:()=
 function InstrumentSheet({instrument,onClose,refresh,done,onShare}:{instrument:Instrument;onClose:()=>void;refresh:()=>void;done:(s:string)=>void;onShare:(trade:any)=>void}){
   const [details,setDetails]=useState<Instrument>(instrument); const [qty,setQty]=useState(1); const [busy,setBusy]=useState(false)
   useEffect(()=>{api<Instrument>(`/market/instruments/${instrument.id}`).then(setDetails)},[instrument.id])
-  const trade=async(side:'buy'|'sell')=>{setBusy(true);try{const r=await api<any>(`/trades/${side}`,{method:'POST',headers:{'Idempotency-Key':crypto.randomUUID()},body:JSON.stringify({instrument_id:instrument.id,quantity:qty})});done(`${r.message}${side==='sell'?` · результат ${fmt(r.game_pnl,2)} TKN`:''}`);await refresh();if(r.share_prompt)onShare(r);else onClose()}catch(e:any){done(e.message)}finally{setBusy(false)}}
+  const trade=async(side:'buy'|'sell')=>{setBusy(true);try{const r=await api<any>(`/trades/${side}`,{method:'POST',headers:{'Idempotency-Key':createIdempotencyKey()},body:JSON.stringify({instrument_id:instrument.id,quantity:qty})});done(`${r.message}${side==='sell'?` · результат ${fmt(r.game_pnl,2)} TKN`:''}`);await refresh();if(r.share_prompt)onShare(r);else onClose()}catch(e:any){done(e.message)}finally{setBusy(false)}}
   return <SheetShell title={details.name} onClose={onClose} wide><div className="sheet-content instrument-detail"><div className="instrument-heading"><div className="ticker-logo large">{details.ticker.slice(0,2)}</div><div><span>{details.ticker} · {details.sector}</span><strong>{fmt(details.display_price_tkn,2)} TKN</strong><em className={details.change_pct>=0?'positive':'negative'}>{details.change_pct>=0?'+':''}{fmt(details.change_pct,2)}% сегодня</em></div></div><div className="chart-big"><ResponsiveContainer width="100%" height="100%"><AreaChart data={details.candles||[]}><defs><linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#ef3124" stopOpacity=".28"/><stop offset="1" stopColor="#ef3124" stopOpacity="0"/></linearGradient></defs><XAxis dataKey="t" hide/><Tooltip/><Area dataKey="v" stroke="#ef3124" strokeWidth={3} fill="url(#chartFill)"/></AreaChart></ResponsiveContainer></div><div className="quote-meta"><span>{fmt(details.real_price_rub,2)} ₽ на Мосбирже</span><StatusDot source={details.source}/></div><div className="info-box"><Zap size={20}/><div><strong>Игровой эффект ×10</strong><p>Котировка настоящая, но результат позиции двигается быстрее, чтобы стратегия была заметна за недели.</p></div></div><div className="instrument-copy"><span>Что это</span><p>{details.description}. Риск: {details.risk_level.toLowerCase()}.</p></div>{details.position&&<div className="your-position"><span>Твоя позиция</span><strong>{fmt(details.position.quantity,2)} шт.</strong><em>Средняя: {fmt(details.position.average_buy_token_price,2)} TKN</em></div>}<label className="qty">Количество<input type="number" min="0.0001" step="0.1" value={qty} onChange={e=>setQty(Number(e.target.value))}/></label><div className="trade-actions"><button className="primary" disabled={busy||qty<=0} onClick={()=>trade('buy')}><ArrowDown/>Купить</button><button className="secondary" disabled={busy||!details.position||qty<=0} onClick={()=>trade('sell')}><ArrowUp/>Продать</button></div><small className="disclaimer">Сделка игровая и не отправляется брокеру.</small></div></SheetShell>
 }
 
@@ -1019,7 +1070,7 @@ function AuthenticatedApp({onLogout}:{onLogout:()=>void}){
       {showOnboarding&&<Onboarding finish={finishOnboarding}/>} 
       {sheet==='portfolio'&&<PortfolioSheet data={portfolio} allTimeChangePct={dashboard.all_time_change_pct} onClose={close} onShare={openShareTrade}/>} 
       {sheet==='convert'&&<ConvertSheet conversion={conversion} onClose={close} done={notify} refresh={refresh}/>} 
-      {sheet==='shop'&&<ShopSheet items={items} coins={userCoins} goalId={dashboard.goal?.id} onClose={close} refresh={refresh} done={notify}/>} 
+      {sheet==='shop'&&<ShopSheet items={items} coins={userCoins} tokens={Number(dashboard.wallet?.token_cash||0)} goalId={dashboard.goal?.id} onClose={close} refresh={refresh} done={notify}/>}
       {sheet==='instrument'&&selected&&<InstrumentSheet instrument={selected} onClose={close} refresh={refresh} done={notify} onShare={openShareTrade}/>} 
       {sheet==='piggy'&&<PiggySheet data={piggy} onClose={close} refresh={refresh} done={notify}/>} 
       {sheet==='news'&&<PortfolioNewsSheet onClose={close}/>} 
