@@ -101,6 +101,53 @@ def test_sync_finam_snapshot_updates_database(tmp_path, monkeypatch):
     assert tuple(row) == ("123.45", "120", "finam", "2026-08-19T13:02:02Z")
 
 
+def test_moex_provider_parses_quote_and_candles():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/candles.json"):
+            return httpx.Response(
+                200,
+                json={"candles": {"columns": ["begin", "close"], "data": [["2026-08-18", 120], ["2026-08-19", 123.45]]}},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "securities": {"columns": ["SECID", "PREVPRICE"], "data": [["SBER", 120]]},
+                "marketdata": {
+                    "columns": ["SECID", "LAST", "LCURRENTPRICE", "MARKETPRICE", "SYSTIME"],
+                    "data": [["SBER", 123.45, None, None, "18:40:00"]],
+                },
+            },
+        )
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = main.MoexIssProvider(client=client)
+            quote = await provider.get_quote("SBER")
+            candles = await provider.get_candles("SBER")
+            return quote, candles
+
+    quote, candles = asyncio.run(scenario())
+    assert quote["last"] == "123.45"
+    assert quote["previous_close"] == "120"
+    assert candles[-1] == {"t": "2026-08-19", "v": 1.23}
+
+
+def test_sync_moex_snapshot_updates_database(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "moex-market.db")
+    main.init_db()
+
+    class FakeProvider:
+        async def get_quote(self, ticker):
+            return {"last": "123.45", "previous_close": "120", "timestamp": "2026-08-19T13:02:02Z"}
+
+    updated = asyncio.run(main.sync_moex_snapshot(FakeProvider()))
+
+    assert updated == len(main.INSTRUMENTS)
+    with main.db() as con:
+        row = con.execute("SELECT real_price_rub,previous_close,source,source_timestamp FROM instruments WHERE ticker='SBER'").fetchone()
+    assert tuple(row) == ("123.45", "120", "moex", "2026-08-19T13:02:02Z")
+
+
 def test_demo_market_snapshot_moves_fallback_prices_in_both_directions(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "demo-market.db")
     main.init_db()

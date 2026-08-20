@@ -35,12 +35,16 @@ _db_setting = Path(os.getenv("DATABASE_PATH", "./app-data/alfa_tin.db"))
 DB_PATH = _db_setting if _db_setting.is_absolute() else (ROOT / _db_setting).resolve()
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 APP_SECRET = os.getenv("APP_SECRET", "alfa-tin-dev-secret")
+APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
 AUTH_REQUIRED = os.getenv("AUTH_REQUIRED", "true").lower() == "true"
 ACCESS_TOKEN_DAYS = max(1, int(os.getenv("ACCESS_TOKEN_DAYS", "30")))
 DEMO_MODE = os.getenv("DEMO_MODE", "true").lower() == "true"
 MULTIPLIER = d(os.getenv("GAME_RETURN_MULTIPLIER", "10"))
-MARKET_DATA_PROVIDER = os.getenv("MARKET_DATA_PROVIDER", "finam").strip().lower()
+MARKET_DATA_PROVIDER = os.getenv("MARKET_DATA_PROVIDER", "auto").strip().lower()
 MARKET_REFRESH_SECONDS = max(10.0, float(os.getenv("MARKET_REFRESH_SECONDS", "15")))
+MOEX_ISS_BASE_URL = os.getenv("MOEX_ISS_BASE_URL", "https://iss.moex.com/iss").rstrip("/")
+MOEX_BOARD = os.getenv("MOEX_BOARD", "TQBR").strip().upper()
+MOEX_REQUEST_TIMEOUT_SECONDS = max(1.0, float(os.getenv("MOEX_REQUEST_TIMEOUT_SECONDS", "15")))
 NEWS_CACHE_MINUTES = max(5, int(os.getenv("NEWS_CACHE_MINUTES", "30")))
 APP_TIMEZONE = ZoneInfo(os.getenv("APP_TIMEZONE", "Europe/Moscow"))
 CORS_ALLOWED_ORIGINS = [
@@ -50,13 +54,24 @@ CORS_ALLOWED_ORIGINS = [
 ]
 LOGGER = logging.getLogger("alfa_tin.market_data")
 MARKET_DATA_STATE: dict[str, Any] = {
-    "configured": bool(os.getenv("FINAM_API_SECRET")) and MARKET_DATA_PROVIDER == "finam",
+    "configured": MARKET_DATA_PROVIDER in {"auto", "finam", "moex"},
+    "requested_provider": MARKET_DATA_PROVIDER,
+    "active_provider": None,
     "last_attempt_at": None,
     "last_success_at": None,
     "last_error": None,
     "updated_instruments": 0,
 }
 CURRENT_USER_ID: ContextVar[int | None] = ContextVar("alfa_tin_current_user_id", default=None)
+
+if MARKET_DATA_PROVIDER not in {"auto", "finam", "moex", "demo"}:
+    raise RuntimeError("MARKET_DATA_PROVIDER must be one of: auto, finam, moex, demo")
+if APP_ENV == "production" and APP_SECRET in {"", "change-me", "alfa-tin-dev-secret"}:
+    raise RuntimeError("APP_SECRET must be changed in production")
+
+DEMO_ADMIN_PASSWORD = os.getenv("DEMO_ADMIN_PASSWORD", "demo1234" if APP_ENV != "production" else "")
+if APP_ENV == "production" and len(DEMO_ADMIN_PASSWORD) < 12:
+    raise RuntimeError("DEMO_ADMIN_PASSWORD must contain at least 12 characters in production")
 
 
 def hash_password(password: str) -> str:
@@ -359,7 +374,7 @@ def init_db() -> None:
                 "DROP TABLE social_posts_legacy;"
             )
         if not con.execute("SELECT 1 FROM users LIMIT 1").fetchone():
-            con.execute("INSERT INTO users(id,email,username,password_hash,display_name,birth_date,onboarding_completed,referral_code,role,xp,level,streak_count,last_active_date,created_at) VALUES(1,?,?,?,?,?,?,?,?,?,?,12,?,?)", ("demo@alfa.tin", "sasha", hash_password("demo1234"), "Саша", "2009-05-14", 1, "TIN-SASHA", "admin", 820, 2, local_date().isoformat(), now()))
+            con.execute("INSERT INTO users(id,email,username,password_hash,display_name,birth_date,onboarding_completed,referral_code,role,xp,level,streak_count,last_active_date,created_at) VALUES(1,?,?,?,?,?,?,?,?,?,?,12,?,?)", ("demo@alfa.tin", "sasha", hash_password(DEMO_ADMIN_PASSWORD), "Саша", "2009-05-14", 1, "TIN-SASHA", "admin", 820, 2, local_date().isoformat(), now()))
             con.execute("INSERT INTO wallets VALUES(1,'784.25','0','120','1540',?)", (now(),))
             con.execute("INSERT INTO piggy_accounts(user_id,balance_tkn,current_apr,last_accrual_at,yield_remainder_tkn) VALUES(1,'180','0.124',?,'0')", (now(),))
             con.execute("INSERT INTO tamagotchi VALUES(1,'Тин',86,72,64,48,'[]',?)", (now(),))
@@ -367,8 +382,10 @@ def init_db() -> None:
             con.execute("INSERT INTO ledger_entries(user_id,currency,event_type,amount,balance_after,created_at) VALUES(1,'TKN','START_GRANT','1000','1000',?)", (now(),))
         else:
             demo_user = con.execute("SELECT password_hash FROM users WHERE id=1").fetchone()
-            if demo_user and demo_user["password_hash"] and demo_user["password_hash"].startswith("$argon2"):
-                con.execute("UPDATE users SET password_hash=? WHERE id=1", (hash_password("demo1234"),))
+            if demo_user and demo_user["password_hash"] and (
+                demo_user["password_hash"].startswith("$argon2") or APP_ENV == "production"
+            ):
+                con.execute("UPDATE users SET password_hash=? WHERE id=1", (hash_password(DEMO_ADMIN_PASSWORD),))
         for index, item in enumerate(INSTRUMENTS, 1):
             ticker, name, sector, risk, description, price, prev, featured, *kind = item
             instrument_type = kind[0] if kind else "stock"
@@ -706,8 +723,34 @@ def serialize_instrument(row: sqlite3.Row) -> dict[str, Any]:
     result["real_price_rub"] = float(row["real_price_rub"])
     result["previous_close"] = float(row["previous_close"])
     result["change_pct"] = float(row["change_pct"])
-    result["is_delayed"] = row["source"] != "finam"
-    result["is_stale"] = False
+    result["is_delayed"] = row["source"] == "moex"
+    try:
+        source_time = datetime.fromisoformat(str(row["source_timestamp"]).replace("Z", "+00:00"))
+        if source_time.tzinfo is None:
+            source_time = source_time.replace(tzinfo=APP_TIMEZONE)
+        result["is_stale"] = datetime.now(timezone.utc) - source_time.astimezone(timezone.utc) > timedelta(days=4)
+    except (TypeError, ValueError):
+        result["is_stale"] = True
+    return result
+
+
+def market_status_payload(source: str | None, timestamp: str | None = None) -> dict[str, Any]:
+    if source == "finam":
+        return {"label": "Live · Finam", "timestamp": timestamp or now(), "live": True, "source": source}
+    if source == "moex":
+        return {"label": "MOEX · задержка ~15 мин", "timestamp": timestamp or now(), "live": False, "source": source}
+    return {"label": "Демо-данные", "timestamp": timestamp or now(), "live": False, "source": source or "demo"}
+
+
+def synthetic_candles(row: sqlite3.Row) -> list[dict[str, Any]]:
+    current_tkn = float(display_token_price(d(row["real_price_rub"])))
+    prev_tkn = float(display_token_price(d(row["previous_close"] or row["real_price_rub"])))
+    diff = current_tkn - prev_tkn
+    result = []
+    for index in range(12):
+        value = prev_tkn + (diff * (index / 11.0)) + (((index % 4) - 1.5) * 0.005 * current_tkn)
+        result.append({"t": index, "v": round(max(0.01, value), 2)})
+    result[-1]["v"] = round(current_tkn, 2)
     return result
 
 
@@ -794,11 +837,13 @@ class SocialPostRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
-    provider: FinamTradeApiProvider | None = None
+    providers: list[Any] = []
     sync_task: asyncio.Task[None] | None = None
-    if MARKET_DATA_STATE["configured"]:
-        provider = FinamTradeApiProvider()
-        sync_task = asyncio.create_task(finam_sync_loop(provider), name="finam-market-sync")
+    if MARKET_DATA_PROVIDER != "demo":
+        finam = FinamTradeApiProvider() if MARKET_DATA_PROVIDER in {"auto", "finam"} and os.getenv("FINAM_API_SECRET", "").strip() else None
+        moex = MoexIssProvider() if MARKET_DATA_PROVIDER in {"auto", "finam", "moex"} else None
+        providers = [provider for provider in (finam, moex) if provider]
+        sync_task = asyncio.create_task(market_data_sync_loop(finam, moex), name="market-data-sync")
     else:
         sync_task = asyncio.create_task(demo_market_loop(), name="demo-market-sync")
     try:
@@ -810,7 +855,7 @@ async def lifespan(_: FastAPI):
                 await sync_task
             except asyncio.CancelledError:
                 pass
-        if provider:
+        for provider in providers:
             await provider.close()
 
 
@@ -861,7 +906,7 @@ def health():
         "status": "ok",
         "database": str(DB_PATH),
         "demo_mode": DEMO_MODE,
-        "market_provider": "finam" if MARKET_DATA_STATE["configured"] else "demo-fallback",
+        "market_provider": MARKET_DATA_STATE["active_provider"] or MARKET_DATA_PROVIDER,
         "market_data": dict(MARKET_DATA_STATE),
     }
 
@@ -1470,7 +1515,9 @@ def dashboard():
         ).fetchone()
         quest_summary = dict(quest_summary_row)
         goal = con.execute("SELECT s.* FROM user_goals g JOIN shop_items s ON s.id=g.shop_item_id WHERE g.user_id=?", (user_id,)).fetchone()
-        finam_quote = con.execute("SELECT source_timestamp FROM instruments WHERE source='finam' ORDER BY source_timestamp DESC LIMIT 1").fetchone()
+        market_quote = con.execute(
+            "SELECT source,source_timestamp FROM instruments WHERE source IN ('finam','moex') ORDER BY source_timestamp DESC LIMIT 1"
+        ).fetchone()
         asset_rows = con.execute(
             "SELECT p.*,i.type,i.real_price_rub FROM positions p JOIN instruments i ON i.id=p.instrument_id WHERE p.user_id=?",
             (user_id,),
@@ -1490,7 +1537,10 @@ def dashboard():
             "wallet_breakdown": {"spendable": float(w["token_cash"]), "stocks": float(stock_value), "funds": float(fund_value), "piggy": float(piggy_value)},
             "goal": dict(goal) if goal else None, "streak": streak_state["streak_count"], "streak_state": streak_state,
             "quests_done": quest_summary["daily_done"], "quest_summary": quest_summary,
-            "market_status": {"label": "Live" if finam_quote else "Демо-данные", "timestamp": finam_quote[0] if finam_quote else now(), "live": bool(finam_quote)},
+            "market_status": market_status_payload(
+                market_quote["source"] if market_quote else None,
+                market_quote["source_timestamp"] if market_quote else None,
+            ),
         }
 
 
@@ -1508,29 +1558,32 @@ def instruments(type: str | None = None, search: str | None = None):
 
 
 @app.get("/api/v1/market/instruments/{instrument_id}")
-def instrument(instrument_id: int):
+async def instrument(instrument_id: int):
     user_id = current_user_id()
     with db() as con:
         row = con.execute("SELECT * FROM instruments WHERE id=?", (instrument_id,)).fetchone()
         if not row: raise HTTPException(404, "Инструмент не найден")
         result = serialize_instrument(row)
-        current_tkn = float(display_token_price(d(row["real_price_rub"])))
-        prev_tkn = float(display_token_price(d(row["previous_close"] or row["real_price_rub"])))
-        diff = current_tkn - prev_tkn
-        candles_list = []
-        for i in range(12):
-            step_val = prev_tkn + (diff * (i / 11.0)) + (((i % 4) - 1.5) * 0.005 * current_tkn)
-            candles_list.append({"t": i, "v": round(max(0.01, step_val), 2)})
-        candles_list[-1]["v"] = round(current_tkn, 2)
-        result["candles"] = candles_list
+        result["candles"] = synthetic_candles(row)
         pos = con.execute("SELECT * FROM positions WHERE user_id=? AND instrument_id=?", (user_id, instrument_id)).fetchone()
         result["position"] = dict(pos) if pos else None
-        return result
+        ticker = row["ticker"]
+    if MARKET_DATA_PROVIDER != "demo":
+        provider = MoexIssProvider()
+        try:
+            exchange_candles = await provider.get_candles(ticker)
+            if exchange_candles:
+                result["candles"] = exchange_candles
+        except Exception as exc:
+            LOGGER.warning("MOEX candles request failed for %s: %s: %s", ticker, type(exc).__name__, exc)
+        finally:
+            await provider.close()
+    return result
 
 
 @app.get("/api/v1/market/instruments/{instrument_id}/candles")
-def candles(instrument_id: int):
-    item = instrument(instrument_id)
+async def candles(instrument_id: int):
+    item = await instrument(instrument_id)
     return item["candles"]
 
 
@@ -2455,6 +2508,78 @@ class FinamTradeApiProvider:
         raise RuntimeError(f"Finam quote request failed for {symbol}") from last_error
 
 
+class MoexIssProvider:
+    """Public MOEX ISS adapter used for delayed quotes and daily candles."""
+
+    def __init__(self, client: httpx.AsyncClient | None = None) -> None:
+        self.base = MOEX_ISS_BASE_URL
+        self.board = MOEX_BOARD
+        self._client = client or httpx.AsyncClient(
+            timeout=httpx.Timeout(MOEX_REQUEST_TIMEOUT_SECONDS, connect=min(5.0, MOEX_REQUEST_TIMEOUT_SECONDS)),
+            headers={"User-Agent": "AlfaTeenInvest/1.0"},
+        )
+        self._owns_client = client is None
+
+    async def close(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
+
+    @staticmethod
+    def _first_row(payload: dict[str, Any], block_name: str) -> dict[str, Any]:
+        block = payload.get(block_name) or {}
+        columns = block.get("columns") or []
+        rows = block.get("data") or []
+        return dict(zip(columns, rows[0])) if rows else {}
+
+    async def get_quote(self, ticker: str) -> dict[str, Any]:
+        secid = ticker.split("@", 1)[0].upper()
+        response = await self._client.get(
+            f"{self.base}/engines/stock/markets/shares/boards/{self.board}/securities/{secid}.json",
+            params={
+                "iss.meta": "off",
+                "iss.only": "securities,marketdata",
+                "securities.columns": "SECID,PREVPRICE",
+                "marketdata.columns": "SECID,LAST,LCURRENTPRICE,MARKETPRICE,SYSTIME",
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        security = self._first_row(payload, "securities")
+        market = self._first_row(payload, "marketdata")
+        price = market.get("LAST") or market.get("LCURRENTPRICE") or market.get("MARKETPRICE")
+        previous = security.get("PREVPRICE") or price
+        if price is None:
+            raise ValueError(f"MOEX returned no price for {secid}")
+        return {
+            "last": str(price),
+            "previous_close": str(previous),
+            "timestamp": now(),
+            "exchange_time": market.get("SYSTIME"),
+        }
+
+    async def get_candles(self, ticker: str, days: int = 45) -> list[dict[str, Any]]:
+        secid = ticker.split("@", 1)[0].upper()
+        response = await self._client.get(
+            f"{self.base}/engines/stock/markets/shares/boards/{self.board}/securities/{secid}/candles.json",
+            params={
+                "iss.meta": "off",
+                "interval": "24",
+                "from": (date.today() - timedelta(days=days)).isoformat(),
+                "candles.columns": "begin,close",
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        block = payload.get("candles") or {}
+        columns = block.get("columns") or []
+        result: list[dict[str, Any]] = []
+        for values in (block.get("data") or [])[-30:]:
+            candle = dict(zip(columns, values))
+            if candle.get("close") is not None:
+                result.append({"t": candle.get("begin"), "v": float(display_token_price(d(candle["close"])))})
+        return result
+
+
 async def sync_finam_snapshot(provider: FinamTradeApiProvider | None = None) -> int:
     """Refresh the curated universe from Finam, preserving seeded rows as fallback."""
     owns_provider = provider is None
@@ -2496,6 +2621,7 @@ async def sync_finam_snapshot(provider: FinamTradeApiProvider | None = None) -> 
                     )
             MARKET_DATA_STATE["last_success_at"] = now()
             MARKET_DATA_STATE["updated_instruments"] = len(updates)
+            MARKET_DATA_STATE["active_provider"] = "finam"
         MARKET_DATA_STATE["last_error"] = "; ".join(errors[:3]) if errors else None
         if errors:
             LOGGER.warning("Finam quote sync completed with %d errors: %s", len(errors), "; ".join(errors[:3]))
@@ -2508,22 +2634,100 @@ async def sync_finam_snapshot(provider: FinamTradeApiProvider | None = None) -> 
             await provider.close()
 
 
-async def finam_sync_loop(provider: FinamTradeApiProvider) -> None:
+async def sync_moex_snapshot(provider: MoexIssProvider | None = None) -> int:
+    """Refresh all enabled instruments from the public, delayed MOEX ISS feed."""
+    owns_provider = provider is None
+    provider = provider or MoexIssProvider()
+    MARKET_DATA_STATE["last_attempt_at"] = now()
+    errors: list[str] = []
+    try:
+        with db() as con:
+            universe = [(row["id"], row["ticker"]) for row in con.execute("SELECT id,ticker FROM instruments WHERE enabled=1").fetchall()]
+        semaphore = asyncio.Semaphore(5)
+
+        async def fetch(item: tuple[int, str]):
+            instrument_id, ticker = item
+            async with semaphore:
+                try:
+                    quote = await provider.get_quote(ticker)
+                    last = d(quote["last"])
+                    previous = d(quote.get("previous_close") or last)
+                    change = money((last - previous) / previous * d(100)) if previous else d(0)
+                    return instrument_id, last, previous, change, quote.get("timestamp") or now()
+                except Exception as exc:
+                    errors.append(f"{ticker}: {type(exc).__name__}")
+                    return None
+
+        updates = [item for item in await asyncio.gather(*(fetch(item) for item in universe)) if item]
+        if updates:
+            with db() as con:
+                for instrument_id, last, previous, change, stamp in updates:
+                    con.execute(
+                        "UPDATE instruments SET real_price_rub=?,previous_close=?,change_pct=?,source='moex',source_timestamp=? WHERE id=?",
+                        (str(last), str(previous), str(change), stamp, instrument_id),
+                    )
+            MARKET_DATA_STATE["last_success_at"] = now()
+            MARKET_DATA_STATE["updated_instruments"] = len(updates)
+            MARKET_DATA_STATE["active_provider"] = "moex"
+        MARKET_DATA_STATE["last_error"] = "; ".join(errors[:3]) if errors else None
+        if not updates:
+            raise RuntimeError("MOEX returned no usable quotes")
+        if errors:
+            LOGGER.warning("MOEX quote sync completed with %d errors: %s", len(errors), "; ".join(errors[:3]))
+        return len(updates)
+    except Exception as exc:
+        MARKET_DATA_STATE["last_error"] = f"{type(exc).__name__}: {exc}".rstrip(": ")
+        raise
+    finally:
+        if owns_provider:
+            await provider.close()
+
+
+async def market_data_sync_loop(
+    finam: FinamTradeApiProvider | None,
+    moex: MoexIssProvider | None,
+) -> None:
     while True:
+        errors: list[str] = []
+        updated = 0
         try:
-            await sync_finam_snapshot(provider)
+            if finam:
+                try:
+                    updated = await sync_finam_snapshot(finam)
+                except Exception as exc:
+                    errors.append(f"Finam: {type(exc).__name__}: {exc}".rstrip(": "))
+                    LOGGER.warning("Finam quote refresh failed; trying MOEX: %s: %s", type(exc).__name__, exc)
+            if not updated and moex:
+                try:
+                    updated = await sync_moex_snapshot(moex)
+                except Exception as exc:
+                    errors.append(f"MOEX: {type(exc).__name__}: {exc}".rstrip(": "))
+                    LOGGER.warning("MOEX quote refresh failed: %s: %s", type(exc).__name__, exc)
+            if not updated and DEMO_MODE:
+                updated = sync_demo_market_snapshot()
+                MARKET_DATA_STATE["active_provider"] = "demo-simulated"
+            if errors:
+                MARKET_DATA_STATE["last_error"] = "; ".join(errors)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            LOGGER.warning("Finam quote refresh failed: %s: %s", type(exc).__name__, exc)
-            # A configured but temporarily unavailable provider must not freeze
-            # the educational market. The next successful Finam refresh will
-            # replace these simulated values automatically.
+            MARKET_DATA_STATE["last_error"] = f"{type(exc).__name__}: {exc}".rstrip(": ")
             try:
-                sync_demo_market_snapshot()
+                if DEMO_MODE:
+                    sync_demo_market_snapshot()
+                    MARKET_DATA_STATE["active_provider"] = "demo-simulated"
             except Exception as fallback_exc:
                 LOGGER.warning("Demo fallback refresh failed: %s: %s", type(fallback_exc).__name__, fallback_exc)
         await asyncio.sleep(MARKET_REFRESH_SECONDS)
+
+
+async def finam_sync_loop(provider: FinamTradeApiProvider) -> None:
+    """Compatibility wrapper retained for integrations using the old function."""
+    moex = MoexIssProvider()
+    try:
+        await market_data_sync_loop(provider, moex)
+    finally:
+        await moex.close()
 
 
 DEMO_MARKET_OFFSETS = (d("-0.18"), d("-0.10"), d("-0.02"), d("0.07"), d("0.16"), d("0.09"), d("0.01"), d("-0.09"))
@@ -2549,6 +2753,7 @@ def sync_demo_market_snapshot(tick: int | None = None) -> int:
     MARKET_DATA_STATE["last_success_at"] = stamp
     MARKET_DATA_STATE["last_error"] = None
     MARKET_DATA_STATE["updated_instruments"] = len(rows)
+    MARKET_DATA_STATE["active_provider"] = "demo-simulated"
     return len(rows)
 
 
