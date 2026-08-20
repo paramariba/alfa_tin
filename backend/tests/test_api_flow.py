@@ -81,6 +81,26 @@ def test_demo_user_can_complete_critical_economy_flow(tmp_path):
         assert client.get("/api/v1/dashboard").json()["wallet"]["token_cash"] != "1000"
 
 
+def test_trade_preview_returns_exact_buy_cost_and_sell_credit(tmp_path):
+    main.DB_PATH = tmp_path / "trade-preview.db"
+    with TestClient(main.app) as client:
+        buy = client.post(
+            "/api/v1/trades/preview?side=buy",
+            json={"instrument_id": 1, "quantity": "2"},
+        )
+        sell = client.post(
+            "/api/v1/trades/preview?side=sell",
+            json={"instrument_id": 1, "quantity": "2"},
+        )
+
+    assert buy.status_code == 200
+    assert buy.json()["cash_change"] == round(-buy.json()["quote"] * 2, 2)
+    assert buy.json()["enough_cash"] is True
+    assert sell.status_code == 200
+    assert sell.json()["cash_change"] >= 0
+    assert "game_pnl" in sell.json()
+
+
 def test_conversion_uses_rolling_capital_and_cannot_be_improved_by_instant_balance_drop(tmp_path):
     main.DB_PATH = tmp_path / "rolling-conversion.db"
     with TestClient(main.app) as client:
