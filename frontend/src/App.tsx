@@ -131,7 +131,7 @@ function HomePage({dashboard,open,setPage,startMarketMission,missionDone,openQue
     <button className="balance-plane wallet-card" onClick={()=>open('portfolio')}>
       <header className="wallet-card-header"><span><Wallet size={15}/>Основной счёт</span></header>
       <div className="card-balance"><span>МОЖНО ПОТРАТИТЬ</span><motion.strong initial={{opacity:0,y:8}} animate={{opacity:1,y:0}}>{fmt(breakdown.spendable??dashboard.wallet?.token_cash??0,2)} <small>TKN</small></motion.strong><em>Всего в кошельке {fmt(dashboard.net_worth,2)} TKN</em></div>
-      <img className="wallet-tin-3d" src="/assets/tin-wallet-3d-v1.png" alt="" aria-hidden="true"/>
+      <img className="wallet-tin-3d" src="/assets/tin-wallet-3d-v2.png" alt="" aria-hidden="true"/>
       <div className="wallet-assets" aria-label="Состав кошелька">
         <span><small>Акции</small><b>{fmt(breakdown.stocks||0,0)} TKN</b></span>
         <span><small>Фонды</small><b>{fmt(breakdown.funds||0,0)} TKN</b></span>
