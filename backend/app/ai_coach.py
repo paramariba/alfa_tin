@@ -146,7 +146,7 @@ class GeminiCoach:
     def __init__(self, client: httpx.AsyncClient | None = None) -> None:
         self.api_key = os.getenv("GEMINI_API_KEY", "").strip()
         self.model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
-        self.fallback_model = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite").strip()
+        self.fallback_model = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash-lite").strip()
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(35.0, connect=8.0))
         self._owns_client = client is None
 
