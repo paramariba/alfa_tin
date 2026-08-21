@@ -1313,15 +1313,20 @@ def public_trade_rows(con: sqlite3.Connection, user_ids: list[int], limit: int =
     ]
 
 
-def public_post_rows(con: sqlite3.Connection, user_ids: list[int], limit: int = 30) -> list[dict[str, Any]]:
-    if not user_ids:
+def public_post_rows(con: sqlite3.Connection, user_ids: list[int] | None, limit: int = 30) -> list[dict[str, Any]]:
+    if user_ids == []:
         return []
-    placeholders = ",".join("?" for _ in user_ids)
+    where = "WHERE COALESCE(u.is_banned,0)=0"
+    params: list[Any] = []
+    if user_ids is not None:
+        placeholders = ",".join("?" for _ in user_ids)
+        where += f" AND p.user_id IN ({placeholders})"
+        params.extend(user_ids)
     rows = con.execute(
         f"SELECT p.id,p.user_id,p.comment,p.created_at,u.display_name,u.referral_code FROM social_posts p "
-        f"JOIN users u ON u.id=p.user_id WHERE p.user_id IN ({placeholders}) AND COALESCE(u.is_banned,0)=0 "
+        f"JOIN users u ON u.id=p.user_id {where} "
         f"ORDER BY p.created_at DESC,p.id DESC LIMIT ?",
-        (*user_ids, limit),
+        (*params, limit),
     ).fetchall()
     result: list[dict[str, Any]] = []
     for row in rows:
@@ -1348,9 +1353,10 @@ def public_post_rows(con: sqlite3.Connection, user_ids: list[int], limit: int = 
 
 
 @app.get("/api/v1/social/feed")
-def social_feed(scope: str = "top"):
-    if scope not in {"top", "friends"}:
+def social_feed(scope: str = "community"):
+    if scope not in {"community", "top", "friends"}:
         raise HTTPException(422, "Неизвестный режим ленты")
+    normalized_scope = "community" if scope in {"community", "top"} else "friends"
     viewer_id = current_user_id()
     with db() as con:
         current = enrich_user_age(rowdict(con.execute("SELECT birth_date FROM users WHERE id=?", (viewer_id,)).fetchone()))
@@ -1360,15 +1366,17 @@ def social_feed(scope: str = "top"):
         for rank, item in enumerate(top, 1):
             item["rank"] = rank
         friends = [item for item in community if item["is_friend"]]
-        source_ids = [viewer_id, *[item["id"] for item in (friends if scope == "friends" else top)]]
+        friend_ids = [viewer_id, *[item["id"] for item in friends]]
+        trade_source_ids = friend_ids if normalized_scope == "friends" else [viewer_id, *[item["id"] for item in top]]
+        post_source_ids = friend_ids if normalized_scope == "friends" else None
         return {
             "title": current["social_title"] if current else "Тин-Ток",
             "viewer_id": viewer_id,
-            "scope": scope,
+            "scope": normalized_scope,
             "top_users": top,
             "friends": friends,
-            "posts": public_post_rows(con, source_ids),
-            "trades": public_trade_rows(con, source_ids),
+            "posts": public_post_rows(con, post_source_ids),
+            "trades": public_trade_rows(con, trade_source_ids),
         }
 
 

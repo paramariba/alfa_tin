@@ -117,6 +117,43 @@ def test_only_post_owner_can_delete_it(tmp_path, monkeypatch):
         assert all(post["id"] != post_id for post in client.get("/api/v1/social/feed", headers=alice_headers).json()["posts"])
 
 
+def test_community_feed_shows_posts_from_users_outside_top_five(tmp_path, monkeypatch):
+    main.DB_PATH = tmp_path / "community-feed.db"
+    monkeypatch.setattr(main, "AUTH_REQUIRED", True)
+
+    with TestClient(main.app) as client:
+        accounts = []
+        for index in range(8):
+            registered = client.post(
+                "/api/v1/auth/register",
+                json={"name": f"Участник {index}", "password": f"safe-pass-{index}"},
+            ).json()
+            accounts.append(registered)
+
+        viewer_headers = auth_headers(accounts[0]["access_token"])
+        top_ids = {
+            user["id"]
+            for user in client.get("/api/v1/social/feed", headers=viewer_headers).json()["top_users"]
+        }
+        author = next(account for account in reversed(accounts[1:]) if account["user"]["id"] not in top_ids)
+        author_headers = auth_headers(author["access_token"])
+        posted = client.post(
+            "/api/v1/social/posts",
+            json={"comment": "Комментарий обычного участника про @SBER"},
+            headers=author_headers,
+        )
+        assert posted.status_code == 200
+
+        community_feed = client.get("/api/v1/social/feed?scope=community", headers=viewer_headers).json()
+        legacy_feed = client.get("/api/v1/social/feed?scope=top", headers=viewer_headers).json()
+        friend_feed = client.get("/api/v1/social/feed?scope=friends", headers=viewer_headers).json()
+
+        assert community_feed["scope"] == "community"
+        assert any(post["id"] == posted.json()["post_id"] for post in community_feed["posts"])
+        assert any(post["id"] == posted.json()["post_id"] for post in legacy_feed["posts"])
+        assert all(post["id"] != posted.json()["post_id"] for post in friend_feed["posts"])
+
+
 def test_profanity_is_rejected_in_registration_and_profile_name(tmp_path, monkeypatch):
     main.DB_PATH = tmp_path / "name-moderation.db"
     monkeypatch.setattr(main, "AUTH_REQUIRED", True)
