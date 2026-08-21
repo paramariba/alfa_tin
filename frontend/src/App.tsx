@@ -52,7 +52,7 @@ const createIdempotencyKey=()=>{
 const ageFromDate=(value:string)=>{const born=new Date(`${value}T12:00:00`);if(Number.isNaN(born.getTime()))return null;const today=new Date();let age=today.getFullYear()-born.getFullYear();if(today.getMonth()<born.getMonth()||(today.getMonth()===born.getMonth()&&today.getDate()<born.getDate()))age--;return age}
 const yearsWord=(age:number)=>age%10===1&&age%100!==11?'год':age%10>=2&&age%10<=4&&(age%100<12||age%100>14)?'года':'лет'
 
-function AlfaMark(){return <div className="alfa-mark" aria-label="Альфа Тин"><b aria-hidden="true">А</b><span><strong>Альфа</strong><small>Тин</small></span></div>}
+function AlfaMark(){return <div className="alfa-mark" role="img" aria-label="Альфа-Банк"><img src="/assets/logo.png" alt=""/></div>}
 
 function AuthScreen({onAuthenticated}:{onAuthenticated:(token:string)=>void}){
   const [mode,setMode]=useState<'login'|'register'>('register')

@@ -424,6 +424,7 @@ button { cursor: pointer; }
 .alfa-mark>span { display:flex; align-items:baseline; gap:6px; color:var(--ink); font-size:13px; line-height:1; letter-spacing:-.02em; text-transform:uppercase; }
 .alfa-mark>span strong { font-weight:850; }
 .alfa-mark>span small { color:var(--muted); font-size:10px; font-weight:750; letter-spacing:.12em; }
+.alfa-mark>img { display:block; width:auto; height:100%; object-fit:contain; }
 .header-actions { gap: 6px; padding-top: 0; }
 .app-header>div:first-child>.alfa-mark + h1 { margin-top:18px; }
 .theme-toggle,.streak { height: 42px; min-width: 42px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: none; }
